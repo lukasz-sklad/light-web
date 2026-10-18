@@ -1,0 +1,323 @@
+<!doctype html>
+<html lang="pl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <meta name="color-scheme" content="dark">
+  <title>LightCraft — Cyfrowa Ciemnia i Wywoływanie RAW (Web)</title>
+  <link rel="icon" type="image/svg+xml" href="./favicon.svg">
+  <meta name="description" content="LightCraft: Otwartoźródłowa cyfrowa ciemnia, katalogowanie fotografii i nieniszczące wywoływanie plików RAW w przeglądarce (Rust + WebAssembly + WebGPU/WebGL2).">
+  <style>
+    :root { color-scheme: dark; }
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #141517;
+      color: #e5e7eb;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+    canvas#lightcraft_canvas {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      display: block;
+      outline: none;
+    }
+    #loading {
+      position: fixed;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 16px;
+      background: #121315;
+      z-index: 50;
+      transition: opacity 220ms ease-out;
+    }
+    #loading.done {
+      opacity: 0;
+      pointer-events: none;
+    }
+    .brand-header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      font-size: 22px;
+      font-weight: 800;
+      letter-spacing: -0.3px;
+      color: #ffffff;
+    }
+    .brand-badge {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 38px;
+      height: 38px;
+      border-radius: 10px;
+      background: linear-gradient(135deg, #f59e0b, #ea580c);
+      box-shadow: 0 4px 14px rgba(245, 158, 11, 0.35);
+      color: #111;
+      font-size: 19px;
+      font-weight: 900;
+    }
+    .spinner {
+      width: 32px;
+      height: 32px;
+      border: 3px solid rgba(255, 255, 255, 0.1);
+      border-top-color: #f59e0b;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    .progress-box {
+      width: 280px;
+      max-width: 85vw;
+      height: 6px;
+      background: rgba(255, 255, 255, 0.08);
+      border-radius: 999px;
+      overflow: hidden;
+    }
+    .progress-bar {
+      width: 0%;
+      height: 100%;
+      background: linear-gradient(90deg, #f59e0b, #fbbf24);
+      transition: width 0.15s ease-out;
+    }
+    .status-msg {
+      font-size: 13px;
+      font-weight: 500;
+      color: #d1d5db;
+      text-align: center;
+      max-width: 480px;
+      line-height: 1.4;
+      padding: 0 16px;
+    }
+    .status-sub {
+      font-size: 11px;
+      color: #9ca3af;
+      font-variant-numeric: tabular-nums;
+    }
+    .features-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 4px 12px;
+      border-radius: 999px;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      background: rgba(255, 255, 255, 0.03);
+      font-size: 11px;
+      color: #9ca3af;
+      margin-top: 6px;
+    }
+    #loading.error .spinner { display: none; }
+    #loading.error .progress-box { display: none; }
+    #loading.error .status-msg { color: #f87171; font-weight: 600; }
+    #lightcraft_status { position: absolute; left: 0; bottom: 0; width: 1px; height: 1px; overflow: hidden; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <canvas id="lightcraft_canvas"></canvas>
+  <div id="lightcraft_status" aria-live="polite"></div>
+
+  <div id="loading">
+    <div class="brand-header">
+      <div class="brand-badge">✦</div>
+      <span>LightCraft</span>
+    </div>
+    <div class="features-pill">
+      <span>PL</span>
+      <span>•</span>
+      <span>Ciemny motyw</span>
+      <span>•</span>
+      <span>WebGPU / WebGL2</span>
+    </div>
+    <div class="spinner"></div>
+    <div class="progress-box"><div class="progress-bar" id="loading_bar"></div></div>
+    <div class="status-msg" id="loading_msg">Inicjalizacja silnika LightCraft…</div>
+    <div class="status-sub" id="loading_sub">Przygotowywanie WebAssembly…</div>
+  </div>
+
+  <!-- Backward compatibility fallback element for web.rs -->
+  <div id="lightcraft_loading" style="display:none;"></div>
+
+  <script type="module">
+    import init, { start, command, import_file } from "./lightcraft_web.js";
+
+    const loading = document.getElementById("loading");
+    const msg = document.getElementById("loading_msg");
+    const sub = document.getElementById("loading_sub");
+    const bar = document.getElementById("loading_bar");
+
+    function setProgress(pct, statusText, subText) {
+      if (bar && typeof pct === "number") {
+        bar.style.width = `${Math.max(0, Math.min(100, pct)).toFixed(1)}%`;
+      }
+      if (msg && statusText) msg.textContent = statusText;
+      if (sub && subText !== undefined) sub.textContent = subText;
+    }
+
+    async function fetchWasmWithProgress(url) {
+      setProgress(5, "Pobieranie silnika WebAssembly…", "Nawiązywanie połączenia…");
+      const resp = await fetch(url, { credentials: "same-origin" });
+      if (!resp.ok) {
+        throw new Error(`Błąd HTTP ${resp.status} podczas pobierania ${url}`);
+      }
+      const rawTotal = parseInt(resp.headers.get("content-length") || "0", 10);
+      const encoded = !!resp.headers.get("content-encoding");
+      const UNCOMPRESSED_EST = 35000000;
+      const total = (!encoded && rawTotal > 15 * 1024 * 1024) ? rawTotal : UNCOMPRESSED_EST;
+
+      if (!resp.body) {
+        setProgress(50, "Pobieranie silnika WebAssembly…", "Buforowanie pamięci…");
+        const buf = await resp.arrayBuffer();
+        setProgress(85, "Kompilacja modułu WebAssembly…", "Gotowe!");
+        return buf;
+      }
+
+      const reader = resp.body.getReader();
+      const chunks = [];
+      let received = 0;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+        received += value.byteLength;
+        const mb = (received / (1024 * 1024)).toFixed(1);
+        const effTotal = Math.max(total, received);
+        const ratio = Math.min(1, received / effTotal);
+        const totalMb = (effTotal / (1024 * 1024)).toFixed(1);
+        setProgress(
+          5 + ratio * 75,
+          "Pobieranie silnika WebAssembly…",
+          `${mb} MB / ${totalMb} MB (${Math.round(ratio * 100)}%)`
+        );
+      }
+
+      const out = new Uint8Array(received);
+      let offset = 0;
+      for (const c of chunks) {
+        out.set(c, offset);
+        offset += c.byteLength;
+      }
+      setProgress(85, "Kompilacja i inicjalizacja WebAssembly…", "Przygotowywanie wątków…");
+      return out.buffer;
+    }
+
+    const CORS_PROXIES = [
+      (u) => `https://lmk.one/api/cors?url=${encodeURIComponent(u)}`,
+      (u) => `https://corsproxy.io/?url=${encodeURIComponent(u)}`
+    ];
+
+    async function fetchWithCorsFallback(fileUrl, fileName) {
+      const isCrossOrigin = /^https?:\/\//i.test(fileUrl) && !fileUrl.startsWith(window.location.origin);
+      const candidates = isCrossOrigin
+        ? [fileUrl, ...CORS_PROXIES.map((fn) => fn(fileUrl))]
+        : [fileUrl];
+
+      let lastErr = null;
+      for (let i = 0; i < candidates.length; i++) {
+        const candidateUrl = candidates[i];
+        const viaProxy = i > 0;
+        try {
+          setProgress(
+            94,
+            `Wczytywanie pliku: ${fileName}…`,
+            viaProxy ? "Pobieranie przez mostek CORS lmk.one…" : "Pobieranie bezpośrednie…"
+          );
+          const resp = await fetch(candidateUrl, {
+            credentials: isCrossOrigin ? "omit" : "same-origin"
+          });
+          if (!resp.ok) {
+            throw new Error(`HTTP ${resp.status}`);
+          }
+          const bytes = new Uint8Array(await resp.arrayBuffer());
+          if (bytes.byteLength === 0) {
+            throw new Error("Pusty plik (0 bajtów)");
+          }
+          return bytes;
+        } catch (err) {
+          lastErr = err;
+          console.warn(`[LightCraft] Próba pobrania (${viaProxy ? "proxy #" + i : "bezpośrednia"}) nie powiodła się:`, err);
+        }
+      }
+      throw lastErr || new Error("Nie udało się pobrać pliku z podanego adresu URL");
+    }
+
+    window.addEventListener("contextmenu", (e) => {
+      if (e.target && e.target.id === "lightcraft_canvas") e.preventDefault();
+    });
+
+    (async () => {
+      try {
+        setProgress(2, "Inicjalizacja modułów…", "Pobieranie zasobów fontów…");
+        const chineseFontPromise = fetch("./lightcraft_zh_hans.otf")
+          .then(async (response) => (response.ok ? new Uint8Array(await response.arrayBuffer()) : new Uint8Array()))
+          .catch(() => new Uint8Array());
+
+        const wasmBuffer = await fetchWasmWithProgress("./lightcraft_web_bg.wasm");
+        const [module, font] = await Promise.all([
+          WebAssembly.compile(wasmBuffer),
+          chineseFontPromise,
+        ]);
+
+        globalThis.lightcraftModule = module;
+        await init({ module_or_path: module });
+
+        globalThis.lightcraft = {
+          command,
+          importFile: (typeof import_file === "function") ? import_file : null,
+        };
+
+        setProgress(92, "Uruchamianie interfejsu graficznego…", "Inicjalizacja WebGPU / WebGL2…");
+        start(font);
+
+        // Obsługa parametru ?file=... z automatyczną sekwencją
+        const params = new URLSearchParams(window.location.search);
+        const fileUrl = params.get("file");
+        if (fileUrl) {
+          const cleanPath = fileUrl.split("?")[0].split("#")[0];
+          const fileName = decodeURIComponent(cleanPath.split("/").pop() || "photo.dng");
+          try {
+            const bytes = await fetchWithCorsFallback(fileUrl, fileName);
+            setProgress(97, `Importowanie fotografii: ${fileName}…`, `${(bytes.byteLength / (1024 * 1024)).toFixed(2)} MB`);
+            if (globalThis.lightcraft.importFile) {
+              await globalThis.lightcraft.importFile(fileName, bytes);
+            }
+            // Automatyczne przejście do widoku szczegółowego / edycji (Develop / Loupe)
+            setTimeout(async () => {
+              try {
+                await globalThis.lightcraft.command("view.detail", "{}");
+              } catch (_) {}
+            }, 300);
+          } catch (fileErr) {
+            console.warn("[LightCraft] Nie udało się wczytać pliku z ?file=:", fileErr);
+          }
+        }
+
+        setProgress(100, "Gotowe!", "Uruchomiono LightCraft");
+        loading.classList.add("done");
+        setTimeout(() => loading.remove(), 250);
+      } catch (err) {
+        console.error("LightCraft failed to start:", err);
+        const params = new URLSearchParams(window.location.search);
+        if (!params.has("webgl")) {
+          params.set("webgl", "1");
+          setProgress(50, "Przełączanie na tryb zgodności WebGL2…", "Ponowne uruchamianie…");
+          window.location.search = params.toString();
+          return;
+        }
+        loading.classList.add("error");
+        setProgress(0, "Nie udało się uruchomić LightCraft", String(err));
+      }
+    })();
+  </script>
+</body>
+</html>
